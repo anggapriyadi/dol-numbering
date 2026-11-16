@@ -2,11 +2,10 @@ from fastapi import FastAPI, HTTPException
 import psycopg2
 from datetime import datetime
 from pydantic import BaseModel
-
 import os
 from dotenv import load_dotenv
+import traceback
 
-# Memuat variabel dari file .env
 load_dotenv()
 
 app = FastAPI(title="DOL Numbering Service")
@@ -19,60 +18,83 @@ DB_CONFIG = {
     "port": os.getenv("DB_PORT")
 }
 
-
-# Skema request data dari n8n
-class ProjectPayload(BaseModel):
+# 1. Tambahkan doc_type ke payload agar n8n bisa mengirimkan jenis dokumen yang diminta
+class DocumentPayload(BaseModel):
     id_lead: str
     nama_pekerjaan: str
+    vendor_code: str
+    doc_type: str  # Contoh nilai: "SPPH", "PO", "PKS", "SPK"
 
-import traceback
-
-@app.post("/generate-number-spph") # Diubah ke POST agar bisa menerima body JSON dari n8n
-def generate_number(payload: ProjectPayload):
-    # conn = psycopg2.connect(**DB_CONFIG)
+@app.post("/generate-number")
+def generate_document_number(payload: DocumentPayload):
     conn = None
-    # cursor = conn.cursor()
     cursor = None
     
+    # Validasi jenis dokumen yang didukung
+    doc_type = payload.doc_type.upper()
+    if doc_type not in ["SPPH", "PO", "PKS", "SPK"]:
+        raise HTTPException(status_code=400, detail="Invalid doc_type. Allowed: SPPH, PO, PKS, SPK")
+
     try:
         conn = psycopg2.connect(**DB_CONFIG)
         cursor = conn.cursor()
 
-        # 1. Buat tabel log otomatis jika belum ada (Bulan 2 Fondasi)
+        # 2. Update Primary Key tabel log dengan menyertakan doc_type
         cursor.execute("""
-            CREATE TABLE IF NOT EXISTS document_logs (
-                id_lead VARCHAR(50) PRIMARY KEY,
-                nomor_spph VARCHAR(100) UNIQUE
+            CREATE TABLE IF NOT EXISTS document_file_logs (
+                id_lead VARCHAR(50),
+                vendor_code VARCHAR(50),
+                doc_type VARCHAR(20),
+                nomor_dokumen VARCHAR(100) UNIQUE,
+                PRIMARY KEY (id_lead, vendor_code, doc_type)
             );
         """)
         conn.commit()
 
-        # 2. Cek apakah id_lead ini sudah pernah minta nomor surat (Idempotent Check)
-        cursor.execute("SELECT nomor_spph FROM document_logs WHERE id_lead = %s;", (payload.id_lead,))
+        # 3. Cek apakah dokumen untuk lead, vendor, dan jenis tersebut sudah pernah dibuat
+        cursor.execute(
+            "SELECT nomor_dokumen FROM document_file_logs WHERE id_lead = %s AND vendor_code = %s AND doc_type = %s;", 
+            (payload.id_lead, payload.vendor_code, doc_type)
+        )
         existing_number = cursor.fetchone()
         if existing_number:
-            return {"status": "existing", "nomor_spph": existing_number[0]}
+            return {"status": "existing", "doc_type": doc_type, "nomor_dokumen": existing_number[0]}
 
-        # 3. Jika proyek baru, ambil nomor urut dari PostgreSQL Sequence
-        cursor.execute("SELECT nextval('number_spph_seq');")
-        next_id = cursor.fetchone()[0]
-
+        # 4. Tentukan sequence dan format nomor berdasarkan jenis dokumen
         tahun = datetime.now().strftime("%Y")
-        nomor_resmi = f"{next_id:03d}/22/BIS-04/BUT/{tahun}"
+        
+        if doc_type == "SPPH":
+            cursor.execute("SELECT nextval('number_spph_seq');")
+            next_id = cursor.fetchone()[0]
+            nomor_resmi = f"{next_id:03d}/22/BIS-04/BUT/{tahun}"
+            
+        elif doc_type == "PO":
+            cursor.execute("SELECT nextval('number_po_seq');") # Pastikan sequence ini sudah dibuat di PostgreSQL
+            next_id = cursor.fetchone()[0]
+            nomor_resmi = f"{next_id:03d}/00/BIS-06/BUT/{tahun}"
+            
+        elif doc_type == "PKS":
+            cursor.execute("SELECT nextval('number_pks_seq');")
+            next_id = cursor.fetchone()[0]
+            nomor_resmi = f"PKS/{tahun}/{next_id:03d}"
+            
+        elif doc_type == "SPK":
+            cursor.execute("SELECT nextval('number_spk_seq');")
+            next_id = cursor.fetchone()[0]
+            nomor_resmi = f"SPK/{tahun}/{next_id:03d}"
 
-        # 4. Amankan nomor tersebut ke tabel log sebelum dikirim ke n8n
+        # 5. Simpan log nomor dokumen baru ke database
         cursor.execute(
-            "INSERT INTO document_logs (id_lead, nomor_spph) VALUES (%s, %s);",
-            (payload.id_lead, nomor_resmi)
+            "INSERT INTO document_file_logs (id_lead, vendor_code, doc_type, nomor_dokumen) VALUES (%s, %s, %s, %s);",
+            (payload.id_lead, payload.vendor_code, doc_type, nomor_resmi)
         )
         conn.commit()
 
-        return {"status": "generated", "nomor_spph": nomor_resmi}
+        return {"status": "generated", "doc_type": doc_type, "nomor_dokumen": nomor_resmi}
 
     except Exception as e:
         if conn:
             conn.rollback()
-        # cetak error ke terminal
         print("=== DETAIL ERROR ===")
         traceback.print_exc()
         print("====================")
@@ -85,5 +107,4 @@ def generate_number(payload: ProjectPayload):
 
 if __name__ == "__main__":
     import uvicorn
-    # Mengubah host ke 0.0.0.0 dan mengunci port 8000 agar tidak bentrok dengan Render Service
     uvicorn.run(app, host="127.0.0.1", port=8000)
