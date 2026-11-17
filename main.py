@@ -18,19 +18,19 @@ DB_CONFIG = {
     "port": os.getenv("DB_PORT")
 }
 
-# 1. Tambahkan doc_type ke payload agar n8n bisa mengirimkan jenis dokumen yang diminta
+# 1. Menambahkan doc_type ke payload agar n8n bisa mengirimkan jenis dokumen yang diminta
 class DocumentPayload(BaseModel):
     id_lead: str
     nama_pekerjaan: str
     vendor_code: str
-    doc_type: str  # Contoh nilai: "SPPH", "PO", "PKS", "SPK"
+    doc_type: str
 
 @app.post("/generate-number")
 def generate_document_number(payload: DocumentPayload):
     conn = None
     cursor = None
     
-    # Validasi jenis dokumen yang didukung
+    # Validasi jenis dokumen yang didukung (SPPH, PO, PKS, SPK)
     doc_type = payload.doc_type.upper()
     if doc_type not in ["SPPH", "PO", "PKS", "SPK"]:
         raise HTTPException(status_code=400, detail="Invalid doc_type. Allowed: SPPH, PO, PKS, SPK")
@@ -69,7 +69,7 @@ def generate_document_number(payload: DocumentPayload):
             nomor_resmi = f"{next_id:03d}/22/BIS-04/BUT/{tahun}"
             
         elif doc_type == "PO":
-            cursor.execute("SELECT nextval('number_po_seq');") # Pastikan sequence ini sudah dibuat di PostgreSQL
+            cursor.execute("SELECT nextval('number_po_seq');") 
             next_id = cursor.fetchone()[0]
             nomor_resmi = f"{next_id:03d}/00/BIS-06/BUT/{tahun}"
             
